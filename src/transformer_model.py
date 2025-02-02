@@ -19,15 +19,22 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:x.size(0), :]
     
 class ChatTransformer(pl.LightningModule):
-    def __init__(self, config, tokenizer):
+    def __init__(self, config, tokenizer, num_training_steps):
         super().__init__()
         self.tokenizer = tokenizer
         self.config = config
+        self.num_training_steps = num_training_steps
         
         self.embedding = nn.Embedding(
             tokenizer.vocab_size,
+            config['model']['d_model']
+        )
+        
+        self.pos_encoder = PositionalEncoding(
+            config['model']['d_model'],
             config['model']['max_seq_length']
         )
+        
         self.transformer = Transformer(
             d_model=config['model']['d_model'],
             nhead=config['model']['nhead'],
@@ -43,20 +50,30 @@ class ChatTransformer(pl.LightningModule):
         self.criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
         
     def forward(self, src, tgt):
-        src = self.pos_encoder(self.embedding(src) * math.sqrt(self.config['model']['d_model']))
-        tgt = self.pos_encoder(self.embedding(tgt) * math.sqrt(self.config['model']['d_model']))
+        # Reshape inputs to (seq_len, batch_size, d_model)
+        src = src.permute(1, 0)  # (seq_len, batch_size)
+        tgt = tgt.permute(1, 0)  # (seq_len, batch_size)
         
-        tgt_mask = self.transformer.generate_square_subsequent_mask(tgt.size(0)).to(src.device)
+        # Embed and scale
+        src_embedded = self.embedding(src) * math.sqrt(self.config['model']['d_model'])
+        tgt_embedded = self.embedding(tgt) * math.sqrt(self.config['model']['d_model'])
+        
+        # Add positional encoding
+        src = self.pos_encoder(src_embedded)
+        tgt = self.pos_encoder(tgt_embedded)
+        
+        # Transformer expects (seq_len, batch_size, d_model)
         output = self.transformer(
             src, tgt,
-            tgt_mask=tgt_mask,
+            tgt_mask=self.transformer.generate_square_subsequent_mask(tgt.size(0)),
             src_key_padding_mask=(src == self.tokenizer.pad_token_id),
             tgt_key_padding_mask=(tgt == self.tokenizer.pad_token_id)
         )
+        
         return self.fc_out(output)
     
     def training_step(self, batch, batch_idx):
-        outputs = self(batch['input_idx'], batch['labels'][:, :-1])
+        outputs = self(batch['input_ids'], batch['labels'][:, :-1])
         loss = self.criterion(
             outputs.reshape(-1, outputs.shape[-1]),
             batch['labels'][:, 1:].reshape(-1)
@@ -65,22 +82,34 @@ class ChatTransformer(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        outputs = self(batch['input_ids'], batch['labels'][:, :-1])
+        # Transpose inputs
+        input_ids = batch['input_ids'].permute(1, 0)  # (seq_len, batch_size)
+        labels = batch['labels'].permute(1, 0)        # (seq_len, batch_size)
+        
+        outputs = self(input_ids, labels[:, :-1])
         loss = self.criterion(
             outputs.reshape(-1, outputs.shape[-1]),
-            batch['labels'][:, 1:].reshape(-1)
+            labels[:, 1:].reshape(-1)
         )
         self.log('val_loss', loss, prog_bar=True)
         
-    def configure_callbacks(self):
+    def configure_optimizers(self):
+        lr = float(self.config['training']['learning_rate'])
+        weight_decay = float(self.config['training']['weight_decay'])
+        warmup_steps = int(self.config['training']['warmup_steps'])
+        
+        num_training_steps = int(self.config['training']['epochs']) * self.num_training_steps
+        
         optimizer = torch.optim.AdamW(
             self.parameters(),
-            lr=self.config['training']['learning_rate'],
-            weight_decay=self.config['training']['weight_decay']
+            lr=lr,
+            weight_decay=weight_decay
         )
+        
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=self.config['training']['warmup_steps'],
-            num_training_steps=self.config['training']['epochs'] * len(self.train_dataloader())
+            num_warmup_steps=warmup_steps,
+            num_training_steps=num_training_steps
         )
+        
         return [optimizer], [scheduler]

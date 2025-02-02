@@ -25,9 +25,9 @@ class QADataset(Dataset):
             return_tensors='pt'
         )
         return {
-            'input_ids': encoding['input_ids'].squeeze(),
+            'input_ids': encoding['input_ids'].squeeze().T,
             'attention_mask': encoding['attention_mask'].squeeze(),
-            'labels': encoding['labels'].squeeze()
+            'labels': encoding['labels'].squeeze().T
         }
         
 class QADataModule(pl.LightningDataModule):
@@ -45,8 +45,8 @@ class QADataModule(pl.LightningDataModule):
             self.train_data, self.val_data = torch.utils.data.random_split(dataset, [0.9, 0.1])
     
     def train_dataloader(self):
-        return DataLoader(self.train_data, batch_size=self.batch_size, shuffle=True)
+        return DataLoader(self.train_data, batch_size=self.batch_size, shuffle=True, num_workers=15)
     
     def val_dataloader(self):
-        return DataLoader(self.val_data, batch_size=self.batch_size)
+        return DataLoader(self.val_data, batch_size=self.batch_size, num_workers=15)
     
